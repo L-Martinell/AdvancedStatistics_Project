@@ -1,0 +1,526 @@
+---
+title: "Naive Bayes Classifier for Fake News Recognition"
+author: "Margarita Shnaider, Lorenzo Martinelli"
+---
+
+```{r}
+library(tidyverse)      # General utility & graph functions
+
+# Libraries to handle text (NLP)
+library(NLP)            
+library(tm)            
+library(tokenizers)
+library(SnowballC)
+
+library(caret)
+library(dplyr)
+library(stopwords)
+library(textstem)
+
+library(naivebayes)
+
+library(tidytext)
+
+library(wordcloud)
+
+library(Matrix)
+
+set.seed(13)
+```
+
+![US President Donald J. Trump dancing during a rally. Despite claiming to fight against the spread of fake news, Trump himself, his staff or his supporters have often released inaccurare or false claims](images/trump_dance.png)
+
+
+# Introduction
+Fake news, an expression made popular worldwide by Donald J. Trump during his term as President of the United States, is made-up stories created with the intent of deceiving public opinion, often in order to pursue a political agenda. Fake news is not a new concept at all: for instance, on February 21, 1814 in England a man dressed up as a colonel and spread the news that Emperor Napoleon I of France had been murdered and that the Bourbon Royal Family had been restored. Nowadays however, being able to tell apart a real piece of information from a fake one has become of paramount importance especially due to the rise of social networks and the increasingly ease of accessibility of the Internet in general. These media in fact, despite their many upsides, are severely prone to host fake news, as everyone can share information that may range from inaccurate to outright made up. \
+2024 in particular seems to be a pivotal year: with the Russia-Ukraine and Israel-Palestine wars, as well as the biggest number of voters being called to elections ever in the history of humankind (among the others, voters of the United States, India, the United Kingdom, South Africa, France, and the European Union have been called to vote), fake news might play a key role in shaping the future of the world for a very long time. \
+Something that would make navigating through the seemingly infinite stream of information we have access to is the presence of patterns or common themes that tie together fake news. This way, one could theoretically build an algorithm that could automatically classify a claim as real or false or, potentially, where it falls in this spectrum. The latter concept is somewhat important but also a bit arbitrary to define: an item of information might just be slightly inaccurate or lack a bit of context, but this concept does intuitively feel different from an outright made up story.
+
+![As per usual, reality can hardly ever be divided into "black" or "white". The classification of pieces of news is no different](images/truth_spectrum.png)
+
+The goal of this project is to evaluate the performances of an algorithm in the evaluation of the degree of truth of a piece of information. The algorithm chosen for this task is a Naive Bayes (NB) classifier or estimator. \
+NB estimators are somewhat simple but effective tools for statistical analysis and classification. They lack the complexity and expressive power of a more sophisticated structure, such as a neural network, but they usually yield decent results. Before analyzing the algorithm more in detail, one might want to introduce some terminology that will come in handy:
+
+* **Class**: one of the various target groups. A set of classes could be, for instance, {"Cycling", "Baseball", "Soccer"} or, such as in this case {"Real", "Fake"}. Classes are closely related to the concept of labels, but they are not necessarily the same: let's use the {"Cycling", "Baseball", "Soccer"} set of classes as an example: their respective labels may be (and normally they are) integer numbers, such as {0, 1, 2}.
+* **Document**: the piece of text that has to be evaluated. Documents are usually written in "normal" (or, more appropriately, natural) language.
+* **Token**: a term coming up in a document that actually bears some information or connection between the analyzed piece of text and the task at hand. For example, a word like "the" likely can't be used to efficiently discriminate between the three classes "Cycling", "Soccer", and "Baseball", while the word "goalkeeper" is definitely more useful.
+
+In the document "The athlete overtakes his opponent at the last turn", the tokens are likely going to be {"athlete", "overtakes", "opponent", "last", "turn"} as they can be used to put the document into either one of the three classes (likely "Cycling"). Notice how the token "last" can have two different meanings: "last" as in a synonym of "final" or "last" as in the present tense of the verb "to last". This introduces some uncertainty in the estimation and there is no straightforward way to deal with it with simple architectures.
+
+In the general framework of NB classifiers for the analysis of natural language, there are two main possible strategies that can be employed:
+
+* **Bernoulli model**: studies the presence or absence of a given token in a document. This algorithm ignores the presence of repeated tokens, for example, in a text that contains five times the word "bicycle", that token has the same weight that it would have in another text that contains it only once. 
+* **Multinomial model**: in this model, the probability for a document $d$ to belong to class $c$ is given by:
+$$
+P(c \, | \, d) \propto P(c) \prod_{k = 1}^{n_d}P(t_k \, | \, c)
+$$
+where $P(t_k \, | \, c)$ is the probability that the token $t_k$ appears in a document of class $c$ and $P(c)$ is the prior probability of having a document in class $c$.
+
+For the rest of this work, we are going to focus on multinomial NB.
+
+For this project, we employed two different datasets, for which we compared the results.
+
+
+# Familiarizing with the Dataset
+First of all, we need to import the dataset. The first dataset in particular consists of a training set with 20,800 instances and a test set with 5,200 instances. \
+As per usual, the first task, after having imported the dataset, is to take a partition of the training dasaset and to make a validation set out of it. The validation set is a subset of our training data that is not going to be employed in the training of the algorithm: its purpose, instead, is to evaluate how effective the training was.
+
+```{r}
+train.df1 <- read.csv('./fake-news/train.csv')
+test.df1 <- read.csv('./fake-news/test.csv')
+```
+
+```{r}
+data.split <- function(train.df) {
+        
+        trainIndex <- createDataPartition(train.df$label, p=0.7, 
+                                          list=FALSE, times=1)
+  
+        #Creating dataframes
+        dfTraining <- train.df[trainIndex, ]
+        dfValidation <- train.df[-trainIndex, ]
+        
+        return(list(dfTraining = dfTraining, dfValidation = dfValidation))
+}
+```
+
+
+```{r}
+split_data <- data.split(train.df1)
+
+df1Training <- split_data$dfTraining
+df1Validation <- split_data$dfValidation
+df1Test <- test.df1
+```
+
+```{r}
+print(head(df1Training, 2L))
+```
+
+The structure of the training dataset is as follows:
+
+* **id**: a simple index. It is analogous to the default index that R DataFrames have, except for a minus one shift, likely as a consequence of its original, Python-intended use.
+* **title**: the headline of the item of news.
+* **author**: the author of the piece of information. If unknown, `na` is used instead.
+* **text**: the item of news itself. Could be incomplete.
+* **label**: an integer, referring to the class of truth. In particular, for this first dataset, the classification is binary:
+  + Reliable (Real) - 0
+  + Unreliable (False) - 1
+  
+Before delving into the details of natural language processing (NLP), one might want to analyze a bit the training set. A crucial aspect to take into account is how evenly-spread the data is between the labels. Recalling the multinomial NB formula, $P(c \, | \, d)$ is proportional to $P(c)$, the prior probability to come across class $c$ in the first place. A common way to paramatrize this is by using the Maximum Likelihood Estimator, which in this case is given by $\hat{P}(c) = N_c/N$. Thus, if the training dataset only contains, say, 1 piece of real information out of 1000 samples, then the prior probability for class 0 is 0.1%, heavily reducing the importance of the term $P(t_k \, | \, c)$.
+
+```{r}
+df1Real <- df1Training %>% filter(label == 0)
+df1Fake <- df1Training %>% filter(label == 1)
+
+
+comparison_tbl <- tibble(
+  Validity = c('Real', 'Fake'),
+  number = c(nrow(df1Real), nrow(df1Fake))
+) 
+
+ggplot(data = comparison_tbl, aes(x = Validity, y = number, fill = Validity)) +
+  geom_bar(stat = 'identity') +
+  scale_fill_manual(values = c('Fake' = 'deeppink', 'Real' = 'mediumblue')) +
+  labs(title = 'Distribution of Real and Fake News in Training Dataset 1', x = 'Validity', y = 'Number')
+
+rm(df1Real)
+rm(df1Fake)
+```
+
+# Tokenization, cleaning, normalization
+As previously stated, when performing natural language processing (NLP) the goal is not to have the machine analyzing the entire body of text as we would do as human beings. Instead, the goal is having the machine focusing on a handful of terms that will help it classifying the text, the tokens. The concept of transforming a document into a list of tokens is aptly named "tokenization" and it follows a few steps:
+
+* Words that don't bear much information about the class of the document can (and usually need to) be removed. These words are often referred to as "stopwords" and, in English, include terms such as "the", "of", "a", "must", "would", all terms that are extremely common and have a lot of logical meaning, but are of little use for a machine.
+* Letters need to be standardized when it comes to upper/lowercase. This is because for a human, the words "Pitcher", "PITCHER", or "pitcher" all have the same meaning, but for a machine this is not the case. At most, the presence of a capital letter might be a hint of the position of the word in the text, but NB classifiers don't take this aspect into account. Indeed, the token "pitchers" in both the documents "Pitchers outperformed expectations" and "The player was never surprised by the pitchers" brings in itself a strong hint to the document belonging to the class "Baseball", despite its position.
+  + This practice however might lead to imprecise results: for instance, "smith" might refer to a metal worker or to the extremely common English surname "Smith". 
+* Punctuation and numbers are rarely useful, so they are commonly removed.
+
+Another aspect of tokenization is **stemming**, according to the algorithm developed in 1980 by Martin F. Porter. Simply put, stemming is a technique that takes related words and reduces them to a common root or stem. For example, words like "walk", "walks", "walked", "walkable", and "walker" are all reduced to the common stem "walk". Some words have a stem that doesn't really exist in English: "company", "companies", and "companion" for example are reduced to "compani". \
+An alternative approach to the problem is **lemmatization**. In this case, words are reduced to a common "lemma" that is actually present in the English vocabulary. For example, the same words "walk", "walks", "walked", "walkable", and "walker" are still reduced to their common root "walk", however verbs like "am", "is", "was", "were" are all reduced to their infinitive tense "be". On the other hand, the words "company", "companies", and "companion" are all reduced to "company". \
+For this work, we used lemmatization.
+```{r}
+data.tokenizing <- function(df) {
+
+    stop_words <- stopwords::stopwords(language = "en")
+
+    df %>%
+    rowwise() %>%
+    mutate(words = paste(title, author, text, sep=" ")) %>%
+    mutate(tokens = list(tokenize_words(words,
+                          lowercase=TRUE,
+                          stopwords = stop_words,
+                          strip_punct = TRUE, 
+                          strip_numeric = TRUE
+                        ))) %>%
+      
+    unnest(tokens) %>%
+    mutate(tokens = lemmatize_words(tokens)) %>%
+    mutate(tokens = wordStem(tokens, language = "en")) %>%
+    select(-title, -author, -text, -words) %>%
+    rename(word = tokens)
+}
+```
+
+```{r}
+df1Training.tokenized   <- data.tokenizing(df1Training)
+df1Validation.tokenized <- data.tokenizing(df1Validation)
+df1Test.tokenized       <- data.tokenizing(df1Test)
+```
+
+```{r}
+head(df1Training.tokenized)
+head(df1Validation.tokenized)
+head(df1Test.tokenized)
+```
+An interesting thing might be to visualize which tokens are the most recurring in the training dataset. A particularly charming way to do so is through a "wordcloud". In this example in particular, the 50 most recurring words are shown. Due to the way the validation dataset is built, it is assumed that these tokens are the most common ones in that set as well. Nothing can be said about the test dataset.
+```{r}
+train_corpus <- Corpus(VectorSource(df1Training.tokenized$word))
+wordcloud(train_corpus, max.words = 50)
+```
+
+It might also be interesting to see which words are the most recurring in real and fake news. Other than being aesthetically pleasing, it might already hint at some words that are especially common in one class or the other. It should be noted that words that are exceptionally common in both classes aren't usually very useful when it comes to classifying a document into one of the two classes.
+```{r}
+df1Real.tokenized <- df1Training %>% filter(label == 0) %>% data.tokenizing()
+df1Fake.tokenized <- df1Training %>% filter(label == 1) %>% data.tokenizing()
+```
+
+```{r}
+real_corpus <- Corpus(VectorSource(df1Real.tokenized$word))
+wordcloud(real_corpus, max.words = 50, color = 'forestgreen')
+```
+
+```{r}
+fake_corpus <- Corpus(VectorSource(df1Fake.tokenized$word))
+wordcloud(fake_corpus, max.words = 50, color = 'firebrick2', scale = c(2, .5))
+```
+
+```{r}
+rm(df1Real.tokenized)
+rm(df1Fake.tokenized)
+rm(real_corpus)
+rm(fake_corpus)
+```
+
+There isn't a stark difference between the two sets of tokens, meaning that the most recurring words are not necessarily good indicators of the validity of a piece of information. 
+
+# Feature selection using Multinomial Naive Bayes
+Now we can finally delve into the algorithm itself. Instead of going through the hardship of building a multinomial NB from scratch, R provides us with pre-built packages that fill the purpose. In particular, the package that was employed for this task is `naivebayes`, which contains, among the others, the method `multinomial_naive_bayes`. However, before employing the `multinomial_naive_bayes`, there are still a couple of passages required. 
+
+* The first step is building the so-called **Corpora**. Corpora are collections of documents containing text. Corpora are the building blocks of the library `tm`, although they see extensive use in methods from other packages as well, due to how commonly used `tm` is in the framework of R. Indeed, we already made use of the `Corpus()` method when plotting the wordclouds in the previous section.
+* Corpora then need to be transformed into a **Document-Term Matrix**. A Document-Term Matrix (DTM) is a matrix whose rows represent documents and columns words (if the matrix is transposed, then it is a Term-Document Matrix, TDM). Each entry of a DTM is a number, representing how often the term appears in the document. For example, let's consider the following documents:
+  + D0: "I study in Padua"
+  + D1: "I live in Padua"
+
+Then, the corresponding DTM would look somewhat like this:
+![A simple DTM](images/DTM.png)
+```{r}
+create.matrix <- function(data) {
+  corpus <- Corpus(VectorSource(data$word))
+  dtm <- DocumentTermMatrix(corpus, control=list(wordLengths = c(1, Inf)))
+  return(dtm)
+}
+```
+
+```{r}
+train.dtm1      <- create.matrix(df1Training.tokenized)
+validation.dtm1 <- create.matrix(df1Validation.tokenized)
+test.dtm1       <- create.matrix(df1Test.tokenized)
+```
+
+In order to improve on efficiency, we can neglect a few particularly rare terms, the so called "sparse" terms. In particular, it was decided to remove terms that appear in less than 1% of documents.
+```{r}
+train.dtm1 <- removeSparseTerms(train.dtm1, 0.99)
+validation.dtm1 <- removeSparseTerms(validation.dtm1, 0.99)
+test.dtm1 <- removeSparseTerms(test.dtm1, 0.99)
+```
+
+Before being able to finally pass the training set to the `multinomial_naive_bayes()` method, we need to transform it into a DataFrame. We also transform the labels into factors.
+```{r}
+train.data <- as.data.frame(as.matrix(train.dtm1))
+train.data$label <- as.factor(df1Training.tokenized$label)
+```
+
+```{r}
+val.data <- Matrix(as.matrix(validation.dtm1, sparse = TRUE))
+val.labels <- as.factor(df1Validation.tokenized$label)
+```
+
+```{r}
+test.data <- Matrix(as.matrix(test.dtm1, sparse = TRUE))
+```
+
+Finally, we can work with the `multinomial_naive_bayes()` method. Briefly, the arguments of the method are:
+
+* **x**: a matrix with integer predictors. In this case, the DTM is used
+* **y**: the labels of the training set
+* **prior**: a custom prior for the class distribution. If it is equal to `NULL` (which is also the default value), then the prior will be the MLE $\hat{P}_c = N_c/N$ as found in the training set
+* **laplace**: the constant added in Laplace smoothing
+
+The firs three variables are somewhat straightforward. The equation of the multinomial NB
+$$
+P(c \, | \, d) \propto P(c) \prod_{k = 1}^{n_d}P(t_k \, | \, c)
+$$
+
+is computed by calculating the prior (as specified in its method) and the likelihood. The likelihood, in particular, can naively be computed as follows:
+$$
+\hat{P}_0(t \, | \, c) = \frac{T_{ct}}{\sum_{t'}T_{ct'}}
+$$
+where $T_{ct}$ is the number of appearances of token $t$ in training documents of class $c$, taking into account repeated appearances within the same document. This seems sound at first glance, but one could come up with a very simple counter-example. \
+Let's consider for a moment our old toy model with the three classes {"Cycling", "Baseball", and "Soccer"}. Let's consider the following test document as an example: "The soccer team Fiorentina wins their third soccer championship in a major upset for Italian soccer". This document belongs to the class "Soccer": the word "soccer" itself appears three times in it! However, let's assume that, in the training data, the token "upset" never appeared in class documents belonging to class "Soccer": the likelihood probability of this token will therefore be 0. Since this document contains a word whose likelihood is 0 and the likelihood probabilities are all multiplied, the posterior probability that the document belongs to class "Soccer" is, therefore, 0, which is clearly wrong. \
+A way to solve this is to introduce **Laplace smoothing** (hence why the `laplace` variable in the `multinomial_naive_bayes()` function). Laplace smoothing simply adds a fixed constant to the count $T_{ct}$. If the constant is one, like in this case, it is also referred to **add-one smoothing**:
+$$
+\hat{P}(t \, | \, c) = \frac{T_{ct} + 1}{\sum_{t'}(T_{ct'} + 1)}
+$$
+
+```{r}
+model <- multinomial_naive_bayes(x = train.data[, which(names(train.data) != "label")],
+                                 y = train.data$label,
+                                 prior = NULL,
+                                 laplace = 1)
+```
+
+Now that the model is trained, a prediction on the validation set can be carried out.
+```{r}
+val.prediction <- predict(model, newdata=val.data, type="class")
+```
+
+```{r}
+confMat <- confusionMatrix(val.prediction, val.labels)
+print("Validation Set Evaluation:")
+print(confMat)
+```
+
+```{r}
+confDF <- as.data.frame(confMat$table)
+
+ggplot(data = confDF, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq)) +
+  scale_fill_gradient(low = 'white', high = 'deeppink') +
+  labs(x = 'Reference', y = 'Prediction', title = 'Confusion Matrix on Validation Set') +
+  scale_x_discrete(labels = c('Real', 'Fake')) +
+  scale_y_discrete(labels = c('Real', 'Fake'))
+```
+
+The accuracy on the validation set is extremely satisfactory, being around 90% (within 90.12% and 91.57% with a 95% confidence level). This result is especially outstanding when we consider that it was obtained with a very simple model, and not with a complex neural network with layers upon layers, fancy architectures, and complicated normalization methods. In this case, multinomial NB classifiers proved to be a simpler, but still excellent model. \
+Finally, we can also predict on the test set.
+```{r}
+test.prediction <- predict(model, newdata = test.data)
+```
+
+And print a few headlines from the test set, while also seeing their validity.
+```{r}
+for(i in 1:5){
+  cat(df1Test$title[i])
+  if(as.character(test.prediction[[i]]) == '0'){
+    cat('\n Real news')
+  }
+  else{
+    cat('\n Fake news')
+  }
+  cat('\n\n')
+}
+```
+
+# Testing a More Complex Dataset
+
+With the good results obtained in the previous case, we want to further test the ability of a multinomial NB estimator to work on a more complex dataset. \
+This second dataset consists of a training set with 10240 labeled instances and a test set with 1267 entries.
+```{r}
+train.df2 <- read.csv('./archive/train.csv')
+test.df2 <- read.csv('./archive/test.csv')
+```
+
+```{r}
+names(train.df2) <- tolower(names(train.df2))
+names(test.df2) <- tolower(names(test.df2))
+```
+
+As done previously, we divide the set into training and validation.
+```{r}
+split2_data <- data.split(train.df2)
+
+df2Training <- split2_data$dfTraining
+df2Validation <- split2_data$dfValidation
+df2Test <- test.df2
+```
+
+```{r}
+print(head(df2Training, 3L))
+```
+
+The structure of the training set is:
+* **labels**: an integer representing a class. In this case, there are six different classes, corresponding to six different degrees of truth. In particular, the classes (with their respective labels) are:
+
+  + True - 5
+  + Mostly true - 3
+  + Half true - 2
+  + Barely true - 0
+  + False - 1
+  + Unknown - 0
+  
+* **text**: the main item of news. In this case, it is just a headline
+* **text_tag**: the subject(s) of the piece of information.
+
+As done previously, we might want to see if the training set is evenly distributed:
+```{r}
+true.df        <- train.df2 %>% filter(labels == 5)
+mostly.true.df <- train.df2 %>% filter(labels == 3)
+half.true.df   <- train.df2 %>% filter(labels == 2)
+barely.true.df <- train.df2 %>% filter(labels == 0)
+false.df       <- train.df2 %>% filter(labels == 1)
+unknown.df     <- train.df2 %>% filter(labels == 4)
+
+simple.tbl <- tibble(
+  'Class'  = c('True', 'Mostly true', 'Half true', 'Barely true', 'False', 'Unknown'),
+  'number' = c(nrow(true.df), nrow(mostly.true.df), nrow(half.true.df), nrow(barely.true.df), nrow(false.df), nrow(unknown.df))
+)
+
+simple.tbl$Class <- factor(simple.tbl$Class, levels = c('True', 'Mostly true', 'Half true', 'Barely true', 'False', 'Unknown'))
+
+ggplot(data = simple.tbl, aes(x = Class, y = number, fill = Class)) +
+  geom_bar(stat = 'identity') +
+  scale_fill_manual(values = c('True' = 'deepskyblue', 'Mostly true' = 'seagreen2', 'Half true' = 'goldenrod1', 'Barely true' = 'chocolate2', 'False' = 'firebrick2', 'Unknown' = 'dimgray')) +
+  labs(title = 'Number of entries for each category', x = 'Class', y = 'Frequency')
+
+rm(true.df)
+rm(mostly.true.df)
+rm(half.true.df)
+rm(barely.true.df)
+rm(false.df)
+rm(unknown.df)
+```
+
+With the exception of the "Unknown" class, the other five categories seem to be somewhat evenly spread out. This way, we can enforce a simple, MLE prior for $P(c)$.
+
+Before having the data analyzed by the multinomial NB classifier, we have to pass it through a process that is analogous to the one done for the previous dataset.
+```{r}
+data2.tokenizing <- function(df) {
+
+    stop_words <- stopwords::stopwords(language = "en")
+
+    df %>%
+    rowwise() %>%
+    mutate(words=paste(text, text_tag, sep=" ")) %>%
+    mutate(tokens = list(tokenize_words(text,
+                          lowercase=TRUE,
+                          stopwords = stop_words,
+                          strip_punct = TRUE, 
+                          strip_numeric = TRUE
+                        ))) %>%
+      
+    unnest(tokens) %>%
+    mutate(tokens = lemmatize_words(tokens)) %>%
+    mutate(tokens = wordStem(tokens, language = "en")) %>%
+    select(-text, -words, -text_tag) %>%
+    rename(word = tokens)
+}
+```
+
+```{r}
+df2Training.tokenized   <- data2.tokenizing(df2Training)
+df2Validation.tokenized <- data2.tokenizing(df2Validation)
+df2Test.tokenized       <- data2.tokenizing(df2Test)
+```
+
+```{r}
+head(df2Training.tokenized, 3L)
+```
+
+Creating DTMs for the new dataset
+```{r}
+train.dtm2      <- create.matrix(df2Training.tokenized)
+validation.dtm2 <- create.matrix(df2Validation.tokenized)
+test.dtm2       <- create.matrix(df2Test.tokenized)
+```
+
+Removing sparse terms
+```{r}
+train.dtm2 <- removeSparseTerms(train.dtm2, 0.99)
+validation.dtm2 <- removeSparseTerms(validation.dtm2, 0.99)
+test.dtm2 <- removeSparseTerms(test.dtm2, 0.99)
+```
+
+
+```{r}
+train2.data <- as.data.frame(as.matrix(train.dtm2))
+train2.data$labels <- as.factor(df2Training.tokenized$labels)
+```
+
+```{r}
+val2.data <- Matrix(as.matrix(validation.dtm2, sparse = TRUE))
+val2.labels <- as.factor(df2Validation.tokenized$labels)
+```
+
+```{r}
+test2.data <- Matrix(as.matrix(test.dtm2, sparse=TRUE))
+```
+
+```{r}
+model2 <- multinomial_naive_bayes(x = train2.data[, which(names(train2.data) != "labels")],
+                                 y = train2.data$labels,
+                                 laplace = 1)
+```
+
+```{r}
+val2.prediction <- predict(model2, newdata=val2.data, type="class")
+```
+
+```{r}
+confMat2 <- confusionMatrix(val2.prediction, val2.labels)
+print("Validation Set Evaluation:")
+print(confMat2)
+```
+
+```{r}
+confDF2 <- as.data.frame(confMat2$table)
+
+ggplot(data = confDF2, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq)) +
+  scale_fill_gradient(low = 'white', high = 'deeppink') +
+  labs(x = 'Reference', y = 'Prediction', title = 'Confusion Matrix on Validation Set') +
+  scale_x_discrete(labels = c('Barely true', 'False', 'Half true', 'Mostly true', 'Unknown', 'True')) +
+  scale_y_discrete(labels = c('Barely true', 'False', 'Half true', 'Mostly true', 'Unknown', 'True'))
+```
+
+In this case the results are far less satisfactory than the previous case. The accuracy we obtained is around 22% (within 20.47% and 23.43% with a 95% confidence level). Not only is this value much lower than the previously-attained 90%, but it is also barely any higher than 17%, or roughly 1/6, the equivalent of a completely random guess for six classes. \
+A reason why this is the case might reside in the simplicity of multinomial NB classifiers: as highlighted multiple times throughout this document, multinomial NB classifiers use a simple probabilistic model, their training is very smooth and quick and they don't leave too much room for improvements, as opposed to deep neural networks, which require long training sessions, but can achieve impressive levels of generalization of very complicated tasks. \
+An interesting aspect that could be explored with a more complex architecture, especially one that allows for custom loss functions, would be different level of penalization based on the error made: mistaking a "True" item of news for a "False" one is much worse than mistaking a "True" item for a "Mostly true" item, for example. This however is way outside the scope of this work. \
+The model however doesn't seem to favor "excusable" mistakes more than severe ones: "True" samples are actually predicted to be "False" more often than correctly and "False" is the second most common classification, despite being the most different class, logically speaking.
+We can also try to predict on the test set, although there is not much value in doing so:
+```{r}
+test2.prediction <- predict(model2, newdata = test2.data)
+```
+
+```{r}
+for(i in 1:5){
+  cat(df2Test$text[i])
+  if(as.character(test2.prediction[[i]]) == '0'){
+    cat('\n Barely true')
+  }
+  else if(as.character(test2.prediction[[i]]) == '1'){
+    cat('\n False')
+  }
+  else if(as.character(test2.prediction[[i]]) == '2'){
+    cat('\n Half true')
+  }
+  else if(as.character(test2.prediction[[i]]) == '3'){
+    cat('\n Mostly true')
+  }
+  else if(as.character(test2.prediction[[i]]) == '4'){
+    cat('\n Unknown')
+  }
+  else {
+    cat('\n True')
+  }
+  cat('\n\n')
+}
+```
+
+# Conclusion
+In this notebook we presented the general idea behind a multinomial Naive Bayes classifier. We went through the underlying probabilistic model it follows and how it can be implemented in R. We also introduced the bases of natural language processing, again applying it in the framework of the R programming language. \
+We then made use of these concepts in the task of classifying a selection of articles, divided into two datasets. The first one contained items of information classified as either real or fake, while the second one five degrees of truth were presented, ranging from completely real to outright made-up, as well as stories whose level of truth is unknown. \
+The results obtained in the first case were quite good, with an accuracy over a validation set of around 90%. The second dataset proved to be perhaps a bit too challenging for the multinomial NB classifier to handle, as the accuracy attained, despite a similar procedure, was around 22%. \
+From this simple analysis, we concluded that multinomial NB estimators are powerful tools for simpler analysis, especially due to their very simple model
